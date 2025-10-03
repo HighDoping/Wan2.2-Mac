@@ -2,7 +2,7 @@
 
 **WORK IN PROGRESS**
 
-This repository has the sole purpose of making Wan2.2 run efficiently on Mac M-Series chips. Memory saving is the priority. 
+This repository has the sole purpose of making Wan2.2 run efficiently on Mac M-Series chips. Memory saving is the priority. A14B model is not supported as the MoE structure requires more RAM and I don't have enough resources to test it.
 
 ## Original problems
 
@@ -24,6 +24,7 @@ The original repo also loads all models at startup, which takes a lot of memory.
 ## TODO
 
 - Fix VAE tiling for VAE2.2.
+- Add support for S2V and animate models.
 - Add support for A14B model.
 
 ## Installation
