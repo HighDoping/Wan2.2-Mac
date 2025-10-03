@@ -3,3 +3,8 @@ __pycache__/
 Wan2.2-I2V-A14B
 Wan2.2-T2V-A14B
 Wan2.2-TI2V-5B
+.vscode*
+tmp_examples*
+new_checkpoint*
+batch_test*
+nohup*

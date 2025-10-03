@@ -4,6 +4,8 @@ import binascii
 import logging
 import os
 import os.path as osp
+import shutil
+import subprocess
 
 import imageio
 import torch
@@ -19,6 +21,70 @@ def rand_name(length=8, suffix=''):
             suffix = '.' + suffix
         name += suffix
     return name
+
+
+def merge_video_audio(video_path: str, audio_path: str):
+    """
+    Merge the video and audio into a new video, with the duration set to the shorter of the two,
+    and overwrite the original video file.
+
+    Parameters:
+    video_path (str): Path to the original video file
+    audio_path (str): Path to the audio file
+    """
+    # set logging
+    logging.basicConfig(level=logging.INFO)
+
+    # check
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"video file {video_path} does not exist")
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"audio file {audio_path} does not exist")
+
+    base, ext = os.path.splitext(video_path)
+    temp_output = f"{base}_temp{ext}"
+
+    try:
+        # create ffmpeg command
+        command = [
+            'ffmpeg',
+            '-y',  # overwrite
+            '-i',
+            video_path,
+            '-i',
+            audio_path,
+            '-c:v',
+            'copy',  # copy video stream
+            '-c:a',
+            'aac',  # use AAC audio encoder
+            '-b:a',
+            '192k',  # set audio bitrate (optional)
+            '-map',
+            '0:v:0',  # select the first video stream
+            '-map',
+            '1:a:0',  # select the first audio stream
+            '-shortest',  # choose the shortest duration
+            temp_output
+        ]
+
+        # execute the command
+        logging.info("Start merging video and audio...")
+        result = subprocess.run(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        # check result
+        if result.returncode != 0:
+            error_msg = f"FFmpeg execute failed: {result.stderr}"
+            logging.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        shutil.move(temp_output, video_path)
+        logging.info(f"Merge completed, saved to {video_path}")
+
+    except Exception as e:
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        logging.error(f"merge_video_audio failed with error: {e}")
 
 
 def save_video(tensor,
@@ -157,3 +223,16 @@ def best_output_size(w, h, dw, dh, expected_area):
         return ow1, oh1
     else:
         return ow2, oh2
+
+
+def download_cosyvoice_repo(repo_path):
+    try:
+        import git
+    except ImportError:
+        raise ImportError('failed to import git, please run pip install GitPython')
+    repo = git.Repo.clone_from('https://github.com/FunAudioLLM/CosyVoice.git', repo_path, multi_options=['--recursive'], branch='main')
+
+
+def download_cosyvoice_model(model_name, model_path):
+    from modelscope import snapshot_download
+    snapshot_download('iic/{}'.format(model_name), local_dir=model_path)

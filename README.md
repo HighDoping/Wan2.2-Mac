@@ -2,7 +2,7 @@
 
 **WORK IN PROGRESS**
 
-This repository has the sole purpose of making Wan2.2 run efficiently on Mac M-Series chips. Memory saving is the priority.
+This repository has the sole purpose of making Wan2.2 run efficiently on Mac M-Series chips. Memory saving is the priority. 
 
 ## Original problems
 

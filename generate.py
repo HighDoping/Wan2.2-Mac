@@ -18,7 +18,8 @@ import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
-from wan.utils.utils import save_video, str2bool
+from wan.utils.utils import merge_video_audio, save_video, str2bool
+
 
 EXAMPLE_PROMPT = {
     "t2v-A14B": {
@@ -35,6 +36,26 @@ EXAMPLE_PROMPT = {
         "prompt":
             "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.",
     },
+    "animate-14B": {
+        "prompt": "视频中的人在做动作",
+        "video": "",
+        "pose": "",
+        "mask": "",
+    },
+    "s2v-14B": {
+        "prompt":
+            "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",
+        "image":
+            "examples/i2v_input.JPG",
+        "audio":
+            "examples/talk.wav",
+        "tts_prompt_audio":
+            "examples/zero_shot_prompt.wav",
+        "tts_prompt_text":
+            "希望你以后能够做的比我还好呦。",
+        "tts_text":
+            "收到好友从远方寄来的生日礼物，那份意外的惊喜与深深的祝福让我心中充满了甜蜜的快乐，笑容如花儿般绽放。"
+    },
 }
 
 
@@ -48,6 +69,12 @@ def _validate_args(args):
         args.prompt = EXAMPLE_PROMPT[args.task]["prompt"]
     if args.image is None and "image" in EXAMPLE_PROMPT[args.task]:
         args.image = EXAMPLE_PROMPT[args.task]["image"]
+    if args.audio is None and args.enable_tts is False and "audio" in EXAMPLE_PROMPT[args.task]:
+        args.audio = EXAMPLE_PROMPT[args.task]["audio"]
+    if (args.tts_prompt_audio is None or args.tts_text is None) and args.enable_tts is True and "audio" in EXAMPLE_PROMPT[args.task]:
+        args.tts_prompt_audio = EXAMPLE_PROMPT[args.task]["tts_prompt_audio"]
+        args.tts_prompt_text = EXAMPLE_PROMPT[args.task]["tts_prompt_text"]
+        args.tts_text = EXAMPLE_PROMPT[args.task]["tts_text"]
 
     if args.task == "i2v-A14B":
         assert args.image is not None, "Please specify the image path for i2v."
@@ -69,9 +96,10 @@ def _validate_args(args):
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, sys.maxsize)
     # Size check
-    assert args.size in SUPPORTED_SIZES[
-        args.
-        task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
+    if not 's2v' in args.task:
+        assert args.size in SUPPORTED_SIZES[
+            args.
+            task], f"Unsupport size {args.size} for task {args.task}, supported sizes are: {', '.join(SUPPORTED_SIZES[args.task])}"
 
 
 def _parse_args():
@@ -222,8 +250,79 @@ def _parse_args():
         help="The MPS RAM to use for loading. Eg. 8GB",
     )
 
+    # animate
+    parser.add_argument(
+        "--src_root_path",
+        type=str,
+        default=None,
+        help="The file of the process output path. Default None.")
+    parser.add_argument(
+        "--refert_num",
+        type=int,
+        default=77,
+        help="How many frames used for temporal guidance. Recommended to be 1 or 5."
+    )
+    parser.add_argument(
+        "--replace_flag",
+        action="store_true",
+        default=False,
+        help="Whether to use replace.")
+    parser.add_argument(
+        "--use_relighting_lora",
+        action="store_true",
+        default=False,
+        help="Whether to use relighting lora.")
+    
+    # following args only works for s2v
+    parser.add_argument(
+        "--num_clip",
+        type=int,
+        default=None,
+        help="Number of video clips to generate, the whole video will not exceed the length of audio."
+    )
+    parser.add_argument(
+        "--audio",
+        type=str,
+        default=None,
+        help="Path to the audio file, e.g. wav, mp3")
+    parser.add_argument(
+        "--enable_tts",
+        action="store_true",
+        default=False,
+        help="Use CosyVoice to synthesis audio")
+    parser.add_argument(
+        "--tts_prompt_audio",
+        type=str,
+        default=None,
+        help="Path to the tts prompt audio file, e.g. wav, mp3. Must be greater than 16khz, and between 5s to 15s.")
+    parser.add_argument(
+        "--tts_prompt_text",
+        type=str,
+        default=None,
+        help="Content to the tts prompt audio. If provided, must exactly match tts_prompt_audio")
+    parser.add_argument(
+        "--tts_text",
+        type=str,
+        default=None,
+        help="Text wish to synthesize")
+    parser.add_argument(
+        "--pose_video",
+        type=str,
+        default=None,
+        help="Provide Dw-pose sequence to do Pose Driven")
+    parser.add_argument(
+        "--start_from_ref",
+        action="store_true",
+        default=False,
+        help="whether set the reference image as the starting point for generation"
+    )
+    parser.add_argument(
+        "--infer_frames",
+        type=int,
+        default=80,
+        help="Number of frames per clip, 48 or 80 or others (must be multiple of 4) for 14B s2v"
+    )
     args = parser.parse_args()
-
     _validate_args(args)
 
     return args
@@ -409,6 +508,67 @@ def generate(args):
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
             offload_model=args.offload_model)
+    elif "animate" in args.task:
+        logging.info("Creating Wan-Animate pipeline.")
+        wan_animate = wan.WanAnimate(
+            config=cfg,
+            checkpoint_dir=args.ckpt_dir,
+            device_id=device,
+            rank=rank,
+            t5_fsdp=args.t5_fsdp,
+            dit_fsdp=args.dit_fsdp,
+            use_sp=(args.ulysses_size > 1),
+            t5_cpu=args.t5_cpu,
+            convert_model_dtype=args.convert_model_dtype,
+            use_relighting_lora=args.use_relighting_lora
+        )
+
+        logging.info(f"Generating video ...")
+        video = wan_animate.generate(
+            src_root_path=args.src_root_path,
+            replace_flag=args.replace_flag,
+            refert_num = args.refert_num,
+            clip_len=args.frame_num,
+            shift=args.sample_shift,
+            sample_solver=args.sample_solver,
+            sampling_steps=args.sample_steps,
+            guide_scale=args.sample_guide_scale,
+            seed=args.base_seed,
+            offload_model=args.offload_model)
+    elif "s2v" in args.task:
+        logging.info("Creating WanS2V pipeline.")
+        wan_s2v = wan.WanS2V(
+            config=cfg,
+            checkpoint_dir=args.ckpt_dir,
+            device_id=device,
+            rank=rank,
+            t5_fsdp=args.t5_fsdp,
+            dit_fsdp=args.dit_fsdp,
+            use_sp=(args.ulysses_size > 1),
+            t5_cpu=args.t5_cpu,
+            convert_model_dtype=args.convert_model_dtype,
+        )
+        logging.info(f"Generating video ...")
+        video = wan_s2v.generate(
+            input_prompt=args.prompt,
+            ref_image_path=args.image,
+            audio_path=args.audio,
+            enable_tts=args.enable_tts,
+            tts_prompt_audio=args.tts_prompt_audio,
+            tts_prompt_text=args.tts_prompt_text,
+            tts_text=args.tts_text,
+            num_repeat=args.num_clip,
+            pose_video=args.pose_video,
+            max_area=MAX_AREA_CONFIGS[args.size],
+            infer_frames=args.infer_frames,
+            shift=args.sample_shift,
+            sample_solver=args.sample_solver,
+            sampling_steps=args.sample_steps,
+            guide_scale=args.sample_guide_scale,
+            seed=args.base_seed,
+            offload_model=args.offload_model,
+            init_first_frame=args.start_from_ref,
+        )
     else:
         logging.info("Creating WanI2V pipeline.")
         wan_i2v = wan.WanI2V(
@@ -426,7 +586,6 @@ def generate(args):
             disk_offload=args.disk_offload,
             mps_ram=args.mps_ram,
         )
-
         logging.info("Generating video ...")
         video = wan_i2v.generate(
             args.prompt,
@@ -456,6 +615,11 @@ def generate(args):
             nrow=1,
             normalize=True,
             value_range=(-1, 1))
+        if "s2v" in args.task:
+            if args.enable_tts is False:
+                merge_video_audio(video_path=args.save_file, audio_path=args.audio)
+            else:
+                merge_video_audio(video_path=args.save_file, audio_path="tts.wav")
     del video
     if torch.cuda.is_available():
         torch.cuda.synchronize()
